@@ -21,7 +21,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'ADD_PNOT_NOTE') {
-    window.EvanAutomation.addPnotNoteOnly(message.noteText)
+    window.EvanAutomation.addPnotNoteOnly(message.panSearchId, message.noteText)
       .then((result) => sendResponse({ ok: true, result }))
       .catch((err) => sendResponse({ ok: false, error: String(err && err.message ? err.message : err) }));
     return true;

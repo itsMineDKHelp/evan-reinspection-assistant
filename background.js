@@ -163,36 +163,23 @@ async function buildRows(sheetRows, columnMap, groupings) {
 }
 
 // --- Navigation helpers ---------------------------------------------------------------------
+//
+// Navigating (typing a command into the search bar and clicking Go) sometimes triggers a full
+// page reload and sometimes an in-page AJAX swap - there's no reliable way to tell which from
+// here, and guessing via the tab's browser-level loading status was both slow (it doesn't fire
+// for AJAX swaps, so every navigation ate a full timeout doing nothing) and not actually a
+// correctness check anyway. So this file doesn't try to detect page-load completion at all: it
+// fires the navigation, then immediately starts trying to deliver the next step message,
+// retrying through whatever happens next - a full reload kills the current content script and
+// a fresh one gets auto-injected (via manifest content_scripts) that the retries eventually
+// reach; an AJAX swap keeps the same script alive and it just receives the message once EvAN's
+// call finishes. Either way, the step itself (see automation.js) starts by confirming the
+// correct PAN actually loaded before touching anything, which is the real correctness guard.
 
-// Waits for the tab to finish a navigation triggered a moment ago. Polls chrome.tabs.get rather
-// than chrome.tabs.onUpdated so it also works if the navigation already completed by the time
-// this is called (no event race).
-async function waitForTabLoaded(tabId, { timeout = 15000, settleMs = 250 } = {}) {
-  const start = Date.now();
-  let sawLoading = false;
-  while (Date.now() - start < timeout) {
-    let tab;
-    try {
-      tab = await chrome.tabs.get(tabId);
-    } catch (e) {
-      throw new Error('EvAN tab was closed.');
-    }
-    if (tab.status === 'loading') sawLoading = true;
-    if (tab.status === 'complete' && sawLoading) {
-      await new Promise((r) => setTimeout(r, settleMs));
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  // Didn't observe a loading->complete transition (maybe it was instant); give it one more
-  // settle beat and move on rather than failing the whole row over a timing fluke.
-  await new Promise((r) => setTimeout(r, settleMs));
-}
-
-// The content script is freshly injected on every page load, but there can be a few ms gap
-// between the tab reporting "complete" and the script's listener being registered. Retry a
-// handful of times on "Receiving end does not exist" before giving up.
-async function sendMessageWithRetry(tabId, message, { retries = 6, delay = 200 } = {}) {
+// The content script may be mid-teardown (reload in flight) or not yet re-injected on the new
+// page. Retry for a while on failure rather than giving up after a couple of tries - a real
+// EvAN page load can take a few seconds.
+async function sendMessageWithRetry(tabId, message, { retries = 40, delay = 250 } = {}) {
   let lastError;
   for (let i = 0; i < retries; i++) {
     try {
@@ -206,14 +193,13 @@ async function sendMessageWithRetry(tabId, message, { retries = 6, delay = 200 }
   throw lastError || new Error('sendMessage failed');
 }
 
-async function navigateAndWait(tabId, command) {
+async function navigate(tabId, command) {
   try {
-    await sendMessageWithRetry(tabId, { type: 'TRIGGER_NAV', command }, { retries: 3, delay: 150 });
+    await sendMessageWithRetry(tabId, { type: 'TRIGGER_NAV', command }, { retries: 5, delay: 150 });
   } catch (e) {
     // The port can legitimately die right as navigation starts (bfcache/teardown) - that's
     // expected here, not a failure, as long as the tab actually ends up navigating.
   }
-  await waitForTabLoaded(tabId);
 }
 
 // --- Run state machine -----------------------------------------------------------------------
@@ -247,7 +233,7 @@ function pushLog(pan, type, message) {
 }
 
 async function processOneRow(tabId, row) {
-  await navigateAndWait(tabId, `bldg ${row.panSearchId}`);
+  await navigate(tabId, `bldg ${row.panSearchId}`);
 
   const fillResponse = await sendMessageWithRetry(tabId, {
     type: 'FILL_AND_SAVE_BUILDING',
@@ -262,9 +248,13 @@ async function processOneRow(tabId, row) {
   let note = `${runState.inspectorCode}, Grouping ${row.groupingNumber} ${row.groupingLabel}, ${row.netConditionPercent}%`;
   if (garageAdded) note += ', added 736';
 
-  await navigateAndWait(tabId, `PNOT ${row.panSearchId}`);
+  await navigate(tabId, `PNOT ${row.panSearchId}`);
 
-  const noteResponse = await sendMessageWithRetry(tabId, { type: 'ADD_PNOT_NOTE', noteText: note });
+  const noteResponse = await sendMessageWithRetry(tabId, {
+    type: 'ADD_PNOT_NOTE',
+    panSearchId: row.panSearchId,
+    noteText: note,
+  });
   if (!noteResponse || !noteResponse.ok) {
     throw new Error((noteResponse && noteResponse.error) || 'PNOT note step failed');
   }

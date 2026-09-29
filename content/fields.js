@@ -64,6 +64,20 @@
     return waitFor(() => $(id), opts);
   }
 
+  // After navigating (typing "bldg <panSearchId>" or "PNOT <panSearchId>" and clicking Go),
+  // EvAN's own "Trans:" box at the top of the screen updates to show the transaction that's
+  // actually loaded (e.g. "PZS1 02401040,7,2027"). Waiting for that box to contain our PAN is a
+  // real confirmation the right page is showing - unlike guessing from browser-level load
+  // events, it works the same whether the navigation was a full reload or an in-page AJAX swap,
+  // and it protects against clicking a stale element that has the same id on every PAN's page
+  // (the edit link, the PNOT add button) before EvAN has actually swapped in the new PAN's data.
+  function waitForTransactionReady(panSearchId, opts) {
+    return waitFor(() => {
+      const bar = $(FIELDS.searchBar);
+      return bar && bar.value && bar.value.includes(panSearchId);
+    }, { timeout: 15000, ...opts });
+  }
+
   // Sets a value on an input the way a real user would (so JSF's onblur/onchange handlers,
   // like allowOnlyInts, actually fire) instead of just mutating .value directly.
   function setFieldValue(el, value) {
@@ -128,7 +142,11 @@
     return false;
   }
 
-  async function addPnotNote(noteText) {
+  // panSearchId is optional: pass it when this follows an automated navigation (to confirm the
+  // right PAN's page actually loaded before touching anything), omit it for the manual hotkey
+  // where the user is already looking at the screen themselves.
+  async function addPnotNote(panSearchId, noteText) {
+    if (panSearchId) await waitForTransactionReady(panSearchId);
     await waitForElement(FIELDS.pnotAddButton, { timeout: 10000 });
     const textarea = await openPnotNoteBox();
     setTextareaValue(textarea, noteText);
@@ -144,6 +162,7 @@
     sleep,
     waitFor,
     waitForElement,
+    waitForTransactionReady,
     setFieldValue,
     setFieldById,
     todayYYYYMMDD,

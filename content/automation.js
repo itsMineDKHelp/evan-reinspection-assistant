@@ -2,13 +2,15 @@
 // note screen. Grouping matching and row filtering already happened before this runs (in the
 // background script) - this file only touches the DOM.
 //
-// IMPORTANT: the quicknav search bar + Go button causes a full page navigation (a new EvAN
-// screen loads), not an in-page AJAX update. That destroys this content script's execution
-// context mid-flight. So navigation is never awaited from in here - the background script
-// triggers a nav, then waits for the tab to finish reloading (a fresh copy of this script gets
-// injected automatically), and only then sends the next step. Everything *within* one step
-// below (edit link, field fills, calculate/save, the PNOT add popup) is same-page AJAX and is
-// safe to await normally.
+// IMPORTANT: the quicknav search bar + Go button navigates EvAN to a new screen, sometimes via
+// a full page reload (which destroys this content script's execution context mid-flight),
+// sometimes via an in-page AJAX swap (same script instance keeps running). Either way, the
+// background script never tries to detect which kind it was - it just triggers the nav and
+// sends the next step message right after. Each step below starts by waiting for EvAN's own
+// "Trans:" box to actually show the target PAN before touching anything, which is the one
+// signal that's reliable regardless of which kind of navigation just happened, and protects
+// against clicking a stale element (the edit link / PNOT add button use the same id on every
+// PAN's page) before the new PAN's content has actually swapped in.
 
 (function () {
   const {
@@ -17,6 +19,7 @@
     $,
     waitFor,
     waitForElement,
+    waitForTransactionReady,
     setFieldById,
     todayYYYYMMDD,
     clickElement,
@@ -129,9 +132,11 @@
 
   // --- Step entry points, called by content.js in response to background messages ---
 
-  // Step 1: called right after navigating to "bldg <pan>". Clicks the edit link (AJAX, safe to
-  // await), fills every field, applies the 803/736 code rules, calculates and saves.
+  // Step 1: called right after navigating to "bldg <pan>". Confirms the right PAN actually
+  // loaded, clicks the edit link, fills every field, applies the 803/736 code rules, calculates
+  // and saves.
   async function fillAndSaveBuilding(row, settings) {
+    await waitForTransactionReady(row.panSearchId);
     await waitForElement(FIELDS.editLinkRow(0), { timeout: 10000 });
     clickElement($(FIELDS.editLinkRow(0)));
     await waitForElement(FIELDS.inspectorNew, { timeout: 10000 });
@@ -148,9 +153,10 @@
     return { value, garageAdded: garageResult.added, garagePending: garageResult.pending };
   }
 
-  // Step 2: called right after navigating to "PNOT <pan>". Clicks Add, fills the note, submits.
-  async function addPnotNoteOnly(noteText) {
-    const noteSubmitted = await addPnotNote(noteText);
+  // Step 2: called right after navigating to "PNOT <pan>". Confirms the right PAN actually
+  // loaded, clicks Add, fills the note, submits.
+  async function addPnotNoteOnly(panSearchId, noteText) {
+    const noteSubmitted = await addPnotNote(panSearchId, noteText);
     return { noteSubmitted };
   }
 

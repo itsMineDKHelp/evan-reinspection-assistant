@@ -91,7 +91,7 @@
     withInspectorCode(async (inspectorCode) => {
       const noteText = `${inspectorCode} Reinspection Update`;
       try {
-        const submitted = await addPnotNote(noteText);
+        const submitted = await addPnotNote(null, noteText);
         showToast(submitted ? 'Note added.' : 'Note typed, but no submit button was found, check it manually.', !submitted);
       } catch (err) {
         showToast('Quick-note failed: ' + (err && err.message ? err.message : err), true);
