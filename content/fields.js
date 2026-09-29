@@ -154,11 +154,16 @@
   // panSearchId is optional: pass it when this follows an automated navigation (to confirm the
   // right PAN's page actually loaded before touching anything), omit it for the manual hotkey
   // where the user is already looking at the screen themselves.
-  async function addPnotNote(panSearchId, noteText) {
+  //
+  // submit (default true): the bulk run is unattended so it must submit the note itself; the
+  // manual hotkey passes false to leave the popup open with the note prefilled so the person can
+  // review it before saving themselves.
+  async function addPnotNote(panSearchId, noteText, { submit = true } = {}) {
     if (panSearchId) await waitForTransactionReadyBestEffort(panSearchId);
     await waitForElement(FIELDS.pnotAddButton, { timeout: 10000 });
     const textarea = await openPnotNoteBox();
     setTextareaValue(textarea, noteText);
+    if (!submit) return false;
     const submitted = submitPnotPopup(textarea);
     if (submitted) await sleep(300);
     return submitted;

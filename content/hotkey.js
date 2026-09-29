@@ -87,12 +87,15 @@
     });
   }
 
+  // Leaves the note popup open with the text prefilled rather than submitting it - this is a
+  // manual, attended action, so the person reviews and saves it themselves. The bulk run's own
+  // PNOT step (automation.js) is separate and does submit, since nobody's watching it happen.
   function quickPnotNote() {
     withInspectorCode(async (inspectorCode) => {
       const noteText = `${inspectorCode} Reinspection Update`;
       try {
-        const submitted = await addPnotNote(null, noteText);
-        showToast(submitted ? 'Note added.' : 'Note typed, but no submit button was found, check it manually.', !submitted);
+        await addPnotNote(null, noteText, { submit: false });
+        showToast('Note prefilled, review and save it yourself.');
       } catch (err) {
         showToast('Quick-note failed: ' + (err && err.message ? err.message : err), true);
       }
