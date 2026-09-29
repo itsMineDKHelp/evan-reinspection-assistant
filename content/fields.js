@@ -5,7 +5,6 @@
   const FIELDS = {
     searchBar: 'xact_quicknav_form:transLineField',
     goButton: 'xact_quicknav_form:goButton',
-    editLinkRow: (row) => `nonValidatingAjaxForm:tblbldgDisplay:${row}:editlink2`,
     inspectorNew: 'screen_form:inspectorNew',
     inspCodeNew: 'screen_form:inspCodeNew',
     inspDateNewInputDate: 'screen_form:inspDateNewInputDate',

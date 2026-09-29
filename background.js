@@ -203,6 +203,22 @@ async function ensureContentScriptInjected(tabId) {
   }
 }
 
+async function ensureInjectedInAllEvanTabs() {
+  const tabs = await chrome.tabs.query({ url: 'https://evan.snb.ca/*' });
+  await Promise.all(tabs.map((tab) => ensureContentScriptInjected(tab.id)));
+}
+
+// Fixes the "was already open before the extension loaded/reloaded" gap up front, for manual
+// hotkey use that never goes through a bulk run (which is the only other place this got
+// handled) - so e.g. Ctrl+Shift+Q works right after installing/reloading without needing the
+// tab to navigate first.
+chrome.runtime.onInstalled.addListener(() => {
+  ensureInjectedInAllEvanTabs();
+});
+chrome.runtime.onStartup.addListener(() => {
+  ensureInjectedInAllEvanTabs();
+});
+
 // The content script may be mid-teardown (reload in flight) or not yet re-injected on the new
 // page. Retry for a while on failure rather than giving up after a couple of tries - a real
 // EvAN page load can take a few seconds.
@@ -447,6 +463,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       await stopRun();
       sendResponse({ ok: true });
     } else if (message.type === 'GET_STATE') {
+      // Belt and suspenders alongside onInstalled/onStartup: make sure every open EvAN tab has
+      // the content script (and hotkey listener) running any time the popup is opened.
+      ensureInjectedInAllEvanTabs();
       sendResponse({ ok: true, state: runState || (await chrome.storage.local.get([STORAGE_KEY]))[STORAGE_KEY] || null });
     } else if (message.type === 'DOWNLOAD_RESULTS') {
       if (runState) {

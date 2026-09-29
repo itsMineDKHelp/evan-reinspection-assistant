@@ -158,17 +158,30 @@
 
   // --- Step entry points, called by content.js in response to background messages ---
 
+  // Any element whose id contains "editlink" on the building-list screen - not just row 0 with
+  // the exact "editlink2" suffix, since that exact id wasn't actually found on a real page
+  // (single-building PANs may not use that row/suffix at all).
+  function findEditLink() {
+    return Array.from(document.querySelectorAll('[id*="editlink"]')).find((el) => el.offsetParent !== null) || null;
+  }
+
   // Step 1: called right after navigating to "bldg <pan>". Confirms the right PAN actually
-  // loaded, clicks the edit link, fills every field, applies the 803/736 code rules, calculates
-  // and saves.
+  // loaded, clicks the edit link if needed, fills every field, applies the 803/736 code rules,
+  // calculates and saves.
   async function fillAndSaveBuilding(row, settings) {
     // The building-list screen's own state before the edit link is clicked isn't confirmed, so
     // this stays best-effort. Once on the actual edit screen, the search bar is confirmed to
     // read like "PZS1 05262306,2,2027" - that's checked for real below.
     await waitForTransactionReadyBestEffort(row.panSearchId);
-    await waitWithDiagnostics(() => $(FIELDS.editLinkRow(0)), 'edit link never appeared', { timeout: 15000 });
-    clickElement($(FIELDS.editLinkRow(0)));
-    await waitWithDiagnostics(() => $(FIELDS.inspectorNew), 'edit form never opened after clicking edit link', { timeout: 15000 });
+
+    // For a single-building PAN, EvAN sometimes skips the building-list screen entirely and
+    // lands directly on the edit form - in that case there's no edit link to find or click.
+    if (!$(FIELDS.inspectorNew)) {
+      const editLink = await waitWithDiagnostics(findEditLink, 'edit link never appeared', { timeout: 15000 });
+      clickElement(editLink);
+      await waitWithDiagnostics(() => $(FIELDS.inspectorNew), 'edit form never opened after clicking edit link', { timeout: 15000 });
+    }
+
     await waitWithDiagnostics(
       () => {
         const bar = $(FIELDS.searchBar);
