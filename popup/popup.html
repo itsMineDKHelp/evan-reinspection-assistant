@@ -1,0 +1,68 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>EvAN Reinspection Assistant</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <h1>EvAN Reinspection Assistant</h1>
+
+  <section class="card">
+    <h2>Inspector</h2>
+    <label>Inspector code
+      <input type="text" id="inspectorCode" maxlength="3" placeholder="e.g. H91" />
+    </label>
+  </section>
+
+  <section class="card">
+    <h2>Quick-fill hotkey</h2>
+    <p class="hint">Fills the reinspection boilerplate fields on the building-edit screen. Doesn't calculate or save.</p>
+    <label class="toggle-row">
+      <input type="checkbox" id="hotkeyEnabled" />
+      Enabled &mdash; <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Q</kbd>
+    </label>
+  </section>
+
+  <section class="card" id="uploadSection">
+    <h2>Bulk run</h2>
+    <label>Spreadsheet
+      <input type="file" id="fileInput" accept=".xlsx,.xls" />
+    </label>
+
+    <div id="mappingArea" class="hidden">
+      <h3>Confirm columns</h3>
+      <div class="mapping-row">
+        <label>PAN column <select id="mapPan"></select></label>
+        <label>Description column <select id="mapDescription"></select></label>
+      </div>
+      <div class="mapping-row">
+        <label>Net condition column <select id="mapNetCondition"></select></label>
+        <label>Building count column <select id="mapBuildingCount"></select></label>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="groupingSection">
+    <h2>Groupings</h2>
+    <p class="hint">Grouping number + a short keyword matched against the description column. Fewer words match better.</p>
+    <div id="groupingRows"></div>
+    <button id="addGroupingRow" type="button">+ Add grouping</button>
+  </section>
+
+  <section class="card">
+    <button id="startButton" type="button" disabled>Start bulk run</button>
+    <button id="stopButton" type="button" class="hidden">Stop</button>
+  </section>
+
+  <section class="card hidden" id="progressSection">
+    <h2>Progress</h2>
+    <div id="progressSummary"></div>
+    <div id="progressLog"></div>
+    <button id="downloadButton" type="button" class="hidden">Download results</button>
+  </section>
+
+  <script src="../lib/xlsx.full.min.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

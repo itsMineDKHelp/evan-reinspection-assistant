@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "EvAN Reinspection Assistant",
+  "version": "0.1.0",
+  "description": "Automates EvAN reinspection data entry from an uploaded spreadsheet, plus a one-hand hotkey quick-fill for manual entries.",
+  "permissions": ["storage", "downloads"],
+  "host_permissions": ["https://evan.snb.ca/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://evan.snb.ca/*"],
+      "js": ["lib/xlsx.full.min.js", "content/fields.js", "content/hotkey.js", "content/automation.js", "content/content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
