@@ -1,7 +1,31 @@
 let headers = [];
 let sheetRows = [];
+let fileName = '';
 
 const el = (id) => document.getElementById(id);
+
+// Remembers the uploaded file and groupings across the popup closing (it closes any time it
+// loses focus) without surviving a full browser restart - chrome.storage.session is exactly
+// that: kept in memory for the life of the browser session, cleared when Chrome fully closes.
+async function saveDraft() {
+  await chrome.storage.session.set({
+    draft: {
+      fileName,
+      headers,
+      sheetRows,
+      columnMap: {
+        pan: el('mapPan').value,
+        description: el('mapDescription').value,
+        netCondition: el('mapNetCondition').value,
+        buildingCount: el('mapBuildingCount').value,
+      },
+      groupings: Array.from(document.querySelectorAll('.grouping-row')).map((row) => ({
+        number: row.querySelector('.grouping-number').value,
+        description: row.querySelector('.grouping-keyword').value,
+      })),
+    },
+  });
+}
 
 function detectColumn(headers, patterns) {
   for (const pattern of patterns) {
@@ -26,6 +50,10 @@ function populateSelect(select, headers, selected) {
   }
 }
 
+function updateFileStatus() {
+  el('fileStatus').textContent = fileName ? `${fileName} (${sheetRows.length} rows)` : '';
+}
+
 function handleFile(file) {
   const reader = new FileReader();
   reader.onload = (e) => {
@@ -34,6 +62,7 @@ function handleFile(file) {
     const ws = wb.Sheets[wb.SheetNames[0]];
     sheetRows = XLSX.utils.sheet_to_json(ws, { defval: '' });
     headers = sheetRows.length ? Object.keys(sheetRows[0]) : [];
+    fileName = file.name;
 
     populateSelect(el('mapPan'), headers, detectColumn(headers, ['pan']));
     populateSelect(el('mapDescription'), headers, detectColumn(headers, ['description', 'descript']));
@@ -41,7 +70,9 @@ function handleFile(file) {
     populateSelect(el('mapBuildingCount'), headers, detectColumn(headers, ['bldg count', 'comments']));
 
     el('mappingArea').classList.remove('hidden');
+    updateFileStatus();
     updateStartEnabled();
+    saveDraft();
   };
   reader.readAsArrayBuffer(file);
 }
@@ -70,6 +101,7 @@ function addGroupingRow(number = '', description = '') {
   removeBtn.addEventListener('click', () => {
     row.remove();
     updateStartEnabled();
+    saveDraft();
   });
 
   row.appendChild(numberInput);
@@ -77,8 +109,14 @@ function addGroupingRow(number = '', description = '') {
   row.appendChild(removeBtn);
   el('groupingRows').appendChild(row);
 
-  numberInput.addEventListener('input', updateStartEnabled);
-  descInput.addEventListener('input', updateStartEnabled);
+  numberInput.addEventListener('input', () => {
+    updateStartEnabled();
+    saveDraft();
+  });
+  descInput.addEventListener('input', () => {
+    updateStartEnabled();
+    saveDraft();
+  });
 }
 
 function readGroupings() {
@@ -140,8 +178,34 @@ async function init() {
     if (e.target.files[0]) handleFile(e.target.files[0]);
   });
 
-  el('addGroupingRow').addEventListener('click', () => addGroupingRow());
-  addGroupingRow();
+  el('addGroupingRow').addEventListener('click', () => {
+    addGroupingRow();
+    saveDraft();
+  });
+
+  for (const id of ['mapPan', 'mapDescription', 'mapNetCondition', 'mapBuildingCount']) {
+    el(id).addEventListener('change', saveDraft);
+  }
+
+  const { draft } = await chrome.storage.session.get(['draft']);
+  if (draft && draft.sheetRows && draft.sheetRows.length) {
+    sheetRows = draft.sheetRows;
+    headers = draft.headers || [];
+    fileName = draft.fileName || '';
+
+    populateSelect(el('mapPan'), headers, draft.columnMap && draft.columnMap.pan);
+    populateSelect(el('mapDescription'), headers, draft.columnMap && draft.columnMap.description);
+    populateSelect(el('mapNetCondition'), headers, draft.columnMap && draft.columnMap.netCondition);
+    populateSelect(el('mapBuildingCount'), headers, draft.columnMap && draft.columnMap.buildingCount);
+    el('mappingArea').classList.remove('hidden');
+    updateFileStatus();
+  }
+
+  if (draft && draft.groupings && draft.groupings.length) {
+    for (const g of draft.groupings) addGroupingRow(g.number, g.description);
+  } else {
+    addGroupingRow();
+  }
 
   el('startButton').addEventListener('click', async () => {
     const columnMap = {

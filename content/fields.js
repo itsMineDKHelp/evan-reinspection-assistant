@@ -64,18 +64,27 @@
     return waitFor(() => $(id), opts);
   }
 
-  // After navigating (typing "bldg <panSearchId>" or "PNOT <panSearchId>" and clicking Go),
-  // EvAN's own "Trans:" box at the top of the screen updates to show the transaction that's
-  // actually loaded (e.g. "PZS1 02401040,7,2027"). Waiting for that box to contain our PAN is a
-  // real confirmation the right page is showing - unlike guessing from browser-level load
-  // events, it works the same whether the navigation was a full reload or an in-page AJAX swap,
-  // and it protects against clicking a stale element that has the same id on every PAN's page
-  // (the edit link, the PNOT add button) before EvAN has actually swapped in the new PAN's data.
+  // Best-effort check that the search/"Trans:" box reflects the PAN we just navigated to, as a
+  // guard against acting on stale content before EvAN swaps in the new PAN's data (the edit
+  // link and PNOT add button use the same id on every PAN's page). This is NOT relied on as a
+  // hard gate - unconfirmed behavior on the real field (it may clear itself after a command
+  // runs, in which case this would never resolve) means a step must still be able to proceed
+  // when this simply times out. Callers should catch/ignore rejection rather than let it kill
+  // the step; see waitForTransactionReadyBestEffort below.
   function waitForTransactionReady(panSearchId, opts) {
     return waitFor(() => {
       const bar = $(FIELDS.searchBar);
       return bar && bar.value && bar.value.includes(panSearchId);
     }, { timeout: 15000, ...opts });
+  }
+
+  async function waitForTransactionReadyBestEffort(panSearchId, opts) {
+    try {
+      await waitForTransactionReady(panSearchId, { timeout: 3000, ...opts });
+    } catch (e) {
+      // Didn't confirm in time - proceed anyway rather than blocking the whole step on an
+      // unverified assumption about this field's behavior.
+    }
   }
 
   // Sets a value on an input the way a real user would (so JSF's onblur/onchange handlers,
@@ -146,7 +155,7 @@
   // right PAN's page actually loaded before touching anything), omit it for the manual hotkey
   // where the user is already looking at the screen themselves.
   async function addPnotNote(panSearchId, noteText) {
-    if (panSearchId) await waitForTransactionReady(panSearchId);
+    if (panSearchId) await waitForTransactionReadyBestEffort(panSearchId);
     await waitForElement(FIELDS.pnotAddButton, { timeout: 10000 });
     const textarea = await openPnotNoteBox();
     setTextareaValue(textarea, noteText);
@@ -163,6 +172,7 @@
     waitFor,
     waitForElement,
     waitForTransactionReady,
+    waitForTransactionReadyBestEffort,
     setFieldValue,
     setFieldById,
     todayYYYYMMDD,

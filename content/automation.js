@@ -19,7 +19,7 @@
     $,
     waitFor,
     waitForElement,
-    waitForTransactionReady,
+    waitForTransactionReadyBestEffort,
     setFieldById,
     todayYYYYMMDD,
     clickElement,
@@ -105,20 +105,22 @@
 
     // The calculate button opens a confirmation panel whose own Save button actually persists
     // the record (see calculateConfirmationPanel in the page). Wait for it to show up.
-    const saveButton = await waitFor(
+    const saveButton = await waitWithDiagnostics(
       () => {
         const candidates = Array.from(document.querySelectorAll('input[type="submit"][value="Save"]'));
         return candidates.find((el) => el.offsetParent !== null) || null;
       },
+      'save confirmation button never appeared after Calculate',
       { timeout: 10000 }
     );
     clickElement(saveButton);
 
-    const banner = await waitFor(
+    const banner = await waitWithDiagnostics(
       () => {
         const el = document.querySelector('.rich-messages-label');
         return el && /GROSS ASSMT/.test(el.textContent) ? el : null;
       },
+      'GROSS ASSMT banner never appeared after Save',
       { timeout: 10000 }
     );
     return banner.textContent;
@@ -130,16 +132,51 @@
     return parseInt(match[1].replace(/,/g, ''), 10);
   }
 
+  // Builds a snapshot of what's actually on screen when a wait times out, so a failed row's
+  // reason says something useful instead of just "waitFor timed out" - there's no way to verify
+  // page behavior against the live site from outside the browser, so this is how the next
+  // failure tells us what's really happening.
+  function pageDiagnostics() {
+    const bar = $(FIELDS.searchBar);
+    const anyEditLinks = Array.from(document.querySelectorAll('[id*="editlink2"]')).map((el) => el.id);
+    return [
+      `url=${location.href}`,
+      `title=${document.title || ''}`,
+      `searchBarValue=${bar ? JSON.stringify(bar.value) : 'missing'}`,
+      `editLinksFound=[${anyEditLinks.join(', ')}]`,
+      `alreadyOnEditScreen=${!!$(FIELDS.inspectorNew)}`,
+    ].join(' | ');
+  }
+
+  async function waitWithDiagnostics(predicate, label, opts) {
+    try {
+      return await waitFor(predicate, opts);
+    } catch (e) {
+      throw new Error(`${label} - ${pageDiagnostics()}`);
+    }
+  }
+
   // --- Step entry points, called by content.js in response to background messages ---
 
   // Step 1: called right after navigating to "bldg <pan>". Confirms the right PAN actually
   // loaded, clicks the edit link, fills every field, applies the 803/736 code rules, calculates
   // and saves.
   async function fillAndSaveBuilding(row, settings) {
-    await waitForTransactionReady(row.panSearchId);
-    await waitForElement(FIELDS.editLinkRow(0), { timeout: 10000 });
+    // The building-list screen's own state before the edit link is clicked isn't confirmed, so
+    // this stays best-effort. Once on the actual edit screen, the search bar is confirmed to
+    // read like "PZS1 05262306,2,2027" - that's checked for real below.
+    await waitForTransactionReadyBestEffort(row.panSearchId);
+    await waitWithDiagnostics(() => $(FIELDS.editLinkRow(0)), 'edit link never appeared', { timeout: 15000 });
     clickElement($(FIELDS.editLinkRow(0)));
-    await waitForElement(FIELDS.inspectorNew, { timeout: 10000 });
+    await waitWithDiagnostics(() => $(FIELDS.inspectorNew), 'edit form never opened after clicking edit link', { timeout: 15000 });
+    await waitWithDiagnostics(
+      () => {
+        const bar = $(FIELDS.searchBar);
+        return bar && bar.value && bar.value.includes(row.panSearchId);
+      },
+      'edit form opened but for a different PAN than expected (stale content)',
+      { timeout: 10000 }
+    );
 
     fillBoilerplateFields(settings.inspectorCode, row.netConditionPercent, row.groupingNumber);
     apply803to802();
