@@ -156,8 +156,10 @@ function renderState(state) {
   el('progressLog').textContent = state.log.slice(-40).map((entry) => entry.text || entry).join('\n');
   el('progressLog').scrollTop = el('progressLog').scrollHeight;
 
-  el('downloadButton').classList.toggle('hidden', state.status !== 'done');
-  el('downloadSkippedButton').classList.toggle('hidden', state.status !== 'done' || skipped === 0);
+  // Available any time at least one row has been processed - running, stopped, or done - so a
+  // stopped or still-in-progress run's partial results aren't stuck unreachable.
+  el('downloadButton').classList.toggle('hidden', done === 0);
+  el('downloadSkippedButton').classList.toggle('hidden', skipped === 0);
 }
 
 async function init() {

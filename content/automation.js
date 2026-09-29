@@ -1,16 +1,10 @@
 // Bulk reinspection automation: drives one PAN through the building-edit screen and the PNOT
-// note screen. Grouping matching and row filtering already happened before this runs (in the
-// background script) - this file only touches the DOM.
-//
-// IMPORTANT: the quicknav search bar + Go button navigates EvAN to a new screen, sometimes via
-// a full page reload (which destroys this content script's execution context mid-flight),
-// sometimes via an in-page AJAX swap (same script instance keeps running). Either way, the
-// background script never tries to detect which kind it was - it just triggers the nav and
-// sends the next step message right after. Each step below starts by waiting for EvAN's own
-// "Trans:" box to actually show the target PAN before touching anything, which is the one
-// signal that's reliable regardless of which kind of navigation just happened, and protects
-// against clicking a stale element (the edit link / PNOT add button use the same id on every
-// PAN's page) before the new PAN's content has actually swapped in.
+// note screen. Grouping matching, row filtering, and navigation between screens all happen in
+// the background script (navigation is a direct chrome.tabs.update, not driven from here) -
+// this file only touches the DOM once a step's target screen is already loading/loaded. Each
+// step starts by waiting for EvAN's own "Trans:" box to actually show the target PAN before
+// touching anything, which protects against acting on a stale element (the edit link / PNOT add
+// button use the same id on every PAN's page) before the new PAN's content has swapped in.
 
 (function () {
   const {
@@ -28,19 +22,6 @@
 
   function isFieldLocked(el) {
     return !el || el.disabled || el.readOnly;
-  }
-
-  // Fire-and-forget: sets the search bar and clicks Go. Does not wait for the resulting
-  // navigation - the caller (background) polls the tab for load completion instead.
-  function triggerNavigate(command) {
-    const bar = $(FIELDS.searchBar);
-    if (!bar) throw new Error('Search bar not found');
-    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    nativeSetter.call(bar, command);
-    bar.dispatchEvent(new Event('input', { bubbles: true }));
-    const goButton = $(FIELDS.goButton);
-    if (!goButton) throw new Error('Go button not found');
-    clickElement(goButton);
   }
 
   function readCodeSlots() {
@@ -71,6 +52,9 @@
     const slots = readCodeSlots();
     const garageSlot = slots.find((s) => s.code === 701);
     if (!garageSlot) return { added: false, pending: false };
+
+    // Don't add a second one if a 736 is already sitting in one of the slots.
+    if (slots.some((s) => s.code === 736)) return { added: false, pending: false };
 
     const garageAreaValue = garageSlot.areaEl ? garageSlot.areaEl.value : '';
     const freeSlot = slots.find((s) => s.code === 0);
@@ -111,7 +95,7 @@
         return candidates.find((el) => el.offsetParent !== null) || null;
       },
       'save confirmation button never appeared after Calculate',
-      { timeout: 10000 }
+      { timeout: 20000 }
     );
     clickElement(saveButton);
 
@@ -121,7 +105,7 @@
         return el && /GROSS ASSMT/.test(el.textContent) ? el : null;
       },
       'GROSS ASSMT banner never appeared after Save',
-      { timeout: 10000 }
+      { timeout: 20000 }
     );
     return banner.textContent;
   }
@@ -210,5 +194,5 @@
     return { noteSubmitted };
   }
 
-  window.EvanAutomation = { triggerNavigate, fillAndSaveBuilding, addPnotNoteOnly };
+  window.EvanAutomation = { fillAndSaveBuilding, addPnotNoteOnly };
 })();

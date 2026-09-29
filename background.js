@@ -160,17 +160,27 @@ async function buildRows(sheetRows, columnMap, groupings) {
 
 // --- Navigation helpers ---------------------------------------------------------------------
 //
-// Navigating (typing a command into the search bar and clicking Go) sometimes triggers a full
-// page reload and sometimes an in-page AJAX swap - there's no reliable way to tell which from
-// here, and guessing via the tab's browser-level loading status was both slow (it doesn't fire
-// for AJAX swaps, so every navigation ate a full timeout doing nothing) and not actually a
-// correctness check anyway. So this file doesn't try to detect page-load completion at all: it
-// fires the navigation, then immediately starts trying to deliver the next step message,
-// retrying through whatever happens next - a full reload kills the current content script and
-// a fresh one gets auto-injected (via manifest content_scripts) that the retries eventually
-// reach; an AJAX swap keeps the same script alive and it just receives the message once EvAN's
-// call finishes. Either way, the step itself (see automation.js) starts by confirming the
-// correct PAN actually loaded before touching anything, which is the real correctness guard.
+// Navigation used to go through the in-page search bar + Go button, driven by a message to the
+// content script. That depended on those elements actually being clickable at that moment, and
+// when a click silently failed to do anything (page stuck under a leftover dialog, or whatever
+// else), there was no way to detect it - the code just kept operating on the same stale page for
+// every row after that, which is how a run went stuck for dozens of rows in a row.
+//
+// Two real URLs confirmed this works instead: navigating the tab directly via chrome.tabs.update
+// bypasses the in-page UI entirely, so it can't get stuck behind something blocking a click - it
+// forces a real navigation every time. The step itself (see automation.js) still confirms the
+// correct PAN actually loaded before touching anything, as the real correctness guard.
+function buildingListUrl(panSearchId) {
+  return `https://evan.snb.ca/evan/screens/paninfo/display/bldg.jsf?transLine=bldg+${panSearchId}`;
+}
+
+function pnotUrl(panSearchId) {
+  return `https://evan.snb.ca/evan/screens/panupdate/inspection/other/pnot.jsf?transLine=pnot+${panSearchId}`;
+}
+
+async function navigateToUrl(tabId, url) {
+  await chrome.tabs.update(tabId, { url });
+}
 
 const CONTENT_SCRIPT_FILES = [
   'lib/xlsx.full.min.js',
@@ -237,15 +247,6 @@ async function sendMessageWithRetry(tabId, message, { retries = 40, delay = 250 
   throw lastError || new Error('sendMessage failed');
 }
 
-async function navigate(tabId, command) {
-  try {
-    await sendMessageWithRetry(tabId, { type: 'TRIGGER_NAV', command }, { retries: 5, delay: 150 });
-  } catch (e) {
-    // The port can legitimately die right as navigation starts (bfcache/teardown) - that's
-    // expected here, not a failure, as long as the tab actually ends up navigating.
-  }
-}
-
 // --- Run state machine -----------------------------------------------------------------------
 
 async function startRun(sheetRows, columnMap, groupings, inspectorCode) {
@@ -289,7 +290,7 @@ function pushLog(pan, type, message) {
 }
 
 async function processOneRow(tabId, row) {
-  await navigate(tabId, `bldg ${row.panSearchId}`);
+  await navigateToUrl(tabId, buildingListUrl(row.panSearchId));
 
   const fillResponse = await sendMessageWithRetry(tabId, {
     type: 'FILL_AND_SAVE_BUILDING',
@@ -304,7 +305,7 @@ async function processOneRow(tabId, row) {
   let note = `${runState.inspectorCode}, Grouping ${row.groupingNumber} ${row.groupingLabel}, ${row.netConditionPercent}%`;
   if (garageAdded) note += ', added 736';
 
-  await navigate(tabId, `PNOT ${row.panSearchId}`);
+  await navigateToUrl(tabId, pnotUrl(row.panSearchId));
 
   const noteResponse = await sendMessageWithRetry(tabId, {
     type: 'ADD_PNOT_NOTE',
