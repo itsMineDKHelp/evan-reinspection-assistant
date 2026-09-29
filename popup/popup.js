@@ -115,10 +115,11 @@ function renderState(state) {
   el('progressSummary').textContent =
     `${done}/${total} processed — ${okCount} done, ${skipped} skipped, ${errors} errors (status: ${state.status})`;
 
-  el('progressLog').textContent = state.log.slice(-40).join('\n');
+  el('progressLog').textContent = state.log.slice(-40).map((entry) => entry.text || entry).join('\n');
   el('progressLog').scrollTop = el('progressLog').scrollHeight;
 
   el('downloadButton').classList.toggle('hidden', state.status !== 'done');
+  el('downloadSkippedButton').classList.toggle('hidden', state.status !== 'done' || skipped === 0);
 }
 
 async function init() {
@@ -174,6 +175,10 @@ async function init() {
 
   el('downloadButton').addEventListener('click', async () => {
     await chrome.runtime.sendMessage({ type: 'DOWNLOAD_RESULTS' });
+  });
+
+  el('downloadSkippedButton').addEventListener('click', async () => {
+    await chrome.runtime.sendMessage({ type: 'DOWNLOAD_SKIPPED' });
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {

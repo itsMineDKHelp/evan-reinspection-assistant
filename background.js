@@ -240,9 +240,10 @@ async function stopRun() {
   }
 }
 
-function pushLog(entry) {
+function pushLog(pan, type, message) {
+  const entry = { ts: Date.now(), pan, type, message, text: `${type === 'error' ? 'Error on' : type === 'skipped' ? 'Skipped' : 'Done'} PAN ${pan}: ${message}` };
   runState.log.push(entry);
-  if (runState.log.length > 500) runState.log.shift();
+  if (runState.log.length > 2000) runState.log.shift();
 }
 
 async function processOneRow(tabId, row) {
@@ -284,7 +285,7 @@ async function runLoop() {
   const row = runState.rows[runState.index];
 
   if (row.status !== 'pending') {
-    pushLog(`Skipped PAN ${row.pan}: ${row.reason}`);
+    pushLog(row.pan, 'skipped', row.reason);
     runState.index += 1;
     await persist();
     return runLoop();
@@ -303,11 +304,11 @@ async function runLoop() {
     if (!result.noteSubmitted) {
       row.reason = (row.reason ? row.reason + '; ' : '') + 'PNOT note may need manual confirmation';
     }
-    pushLog(`Done PAN ${row.pan}: value ${row.value}`);
+    pushLog(row.pan, 'done', `value ${row.value}` + (row.reason ? ` (${row.reason})` : ''));
   } catch (err) {
     row.status = 'error';
     row.reason = String(err && err.message ? err.message : err);
-    pushLog(`Error on PAN ${row.pan}: ${row.reason}`);
+    pushLog(row.pan, 'error', row.reason);
   }
 
   runState.index += 1;
@@ -318,27 +319,81 @@ async function runLoop() {
   }
 }
 
-async function exportResults() {
-  const rows = runState.rows.map((r) => ({
+// PAN always sits alone in column A on every sheet below so it's a clean VLOOKUP key.
+
+function resultsSheetRows() {
+  return runState.rows.map((r) => ({
     PAN: r.pan,
     Comments: r.reason || '',
     'Chosen Grouping': r.groupingNumber ? `${r.groupingNumber} ${r.groupingLabel}` : '',
     Value: r.value == null ? '' : r.value,
     Status: r.status,
   }));
+}
 
-  const ws = XLSX.utils.json_to_sheet(rows);
+function skippedSheetRows() {
+  return runState.rows
+    .filter((r) => r.status === 'skipped')
+    .map((r) => ({
+      PAN: r.pan,
+      Reason: r.reason || '',
+      Description: r.description || '',
+      'Building Count': r.buildingCount == null ? '' : r.buildingCount,
+    }));
+}
+
+function errorsSheetRows() {
+  return runState.rows
+    .filter((r) => r.status === 'error')
+    .map((r) => ({
+      PAN: r.pan,
+      Error: r.reason || '',
+      Description: r.description || '',
+    }));
+}
+
+function activityLogSheetRows() {
+  return runState.log.map((entry) => ({
+    PAN: entry.pan,
+    Type: entry.type,
+    Message: entry.message,
+    Time: new Date(entry.ts).toLocaleString(),
+  }));
+}
+
+function buildWorkbook(sheets) {
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Results');
+  for (const [name, rows] of sheets) {
+    if (rows.length === 0) continue;
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), name);
+  }
+  return wb;
+}
+
+async function downloadWorkbook(wb, filenameSuffix) {
   const wbArray = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
   const blob = new Blob([wbArray], { type: 'application/octet-stream' });
   const url = URL.createObjectURL(blob);
-
   await chrome.downloads.download({
     url,
-    filename: `evan-reinspection-results-${new Date().toISOString().slice(0, 10)}.xlsx`,
+    filename: `evan-reinspection-${filenameSuffix}-${new Date().toISOString().slice(0, 10)}.xlsx`,
     saveAs: false,
   });
+}
+
+async function exportResults() {
+  const wb = buildWorkbook([
+    ['Results', resultsSheetRows()],
+    ['Skipped', skippedSheetRows()],
+    ['Errors', errorsSheetRows()],
+    ['Activity Log', activityLogSheetRows()],
+  ]);
+  await downloadWorkbook(wb, 'results');
+}
+
+async function exportSkippedOnly() {
+  const wb = buildWorkbook([['Skipped', skippedSheetRows()]]);
+  await downloadWorkbook(wb, 'skipped-only');
 }
 
 // Resume an interrupted run if the service worker was killed and restarted mid-run.
@@ -366,6 +421,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else if (message.type === 'DOWNLOAD_RESULTS') {
       if (runState) {
         await exportResults();
+        sendResponse({ ok: true });
+      } else {
+        sendResponse({ ok: false, error: 'No run results in memory.' });
+      }
+    } else if (message.type === 'DOWNLOAD_SKIPPED') {
+      if (runState) {
+        await exportSkippedOnly();
         sendResponse({ ok: true });
       } else {
         sendResponse({ ok: false, error: 'No run results in memory.' });

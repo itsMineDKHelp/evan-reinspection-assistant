@@ -109,6 +109,11 @@ button:disabled {
   cursor: not-allowed;
 }
 
+#downloadSkippedButton {
+  background: #6b7280;
+  margin-left: 6px;
+}
+
 #stopButton {
   background: #b91c1c;
   margin-left: 6px;
