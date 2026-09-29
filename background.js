@@ -4,12 +4,8 @@ importScripts('lib/xlsx.full.min.js');
 // as best as an MV3 service worker can, survives being briefly killed and restarted mid-run:
 // state is persisted to storage after every row and resumed automatically on wake.
 //
-// Navigating between EvAN screens (typing "bldg <pan>" or "PNOT <pan>" into the search bar and
-// clicking Go) is a full page reload, not an in-page AJAX update - it destroys whatever content
-// script was running mid-step. So every row is driven as a small state machine of messages, and
-// after each navigation-triggering message this file waits for the tab to actually finish
-// reloading (polling chrome.tabs.get) before sending the next one, instead of trying to keep a
-// single message/response pair alive across the reload.
+// Each row is driven as a small state machine of messages sent to the content script running
+// in the EvAN tab (see the Navigation helpers section below for why).
 
 const STORAGE_KEY = 'runState';
 
@@ -176,6 +172,37 @@ async function buildRows(sheetRows, columnMap, groupings) {
 // call finishes. Either way, the step itself (see automation.js) starts by confirming the
 // correct PAN actually loaded before touching anything, which is the real correctness guard.
 
+const CONTENT_SCRIPT_FILES = [
+  'lib/xlsx.full.min.js',
+  'content/fields.js',
+  'content/hotkey.js',
+  'content/automation.js',
+  'content/content.js',
+];
+
+// Chrome only auto-runs manifest content_scripts on a page *load* - it never retroactively
+// injects into a tab that was already open before the extension was installed/reloaded. If the
+// EvAN tab was sitting there from before, nothing is listening until it navigates, so every
+// message fails with "Could not establish connection. Receiving end does not exist." This
+// checks for that and force-injects the same files by hand when needed. content.js guards
+// itself against being loaded twice, so this is safe to call speculatively.
+async function ensureContentScriptInjected(tabId) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => !!window.__evanAssistantLoaded,
+    });
+    if (result) return;
+  } catch (e) {
+    return; // e.g. tab navigated away mid-check; let the caller's own retries surface any real error
+  }
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_SCRIPT_FILES });
+  } catch (e) {
+    // Same idea - a real failure here will just show up as the message still not going through.
+  }
+}
+
 // The content script may be mid-teardown (reload in flight) or not yet re-injected on the new
 // page. Retry for a while on failure rather than giving up after a couple of tries - a real
 // EvAN page load can take a few seconds.
@@ -187,6 +214,7 @@ async function sendMessageWithRetry(tabId, message, { retries = 40, delay = 250 
       return response;
     } catch (err) {
       lastError = err;
+      if (i === 0) await ensureContentScriptInjected(tabId);
       await new Promise((r) => setTimeout(r, delay));
     }
   }
@@ -215,6 +243,18 @@ async function startRun(sheetRows, columnMap, groupings, inspectorCode) {
     log: [],
   };
   await persist();
+
+  // If the EvAN tab was already open before this extension was loaded/reloaded, nothing is
+  // listening in it yet (see ensureContentScriptInjected) - fix that up front instead of
+  // letting the first couple of rows fail and recover on their own.
+  try {
+    const tabId = await getEvanTabId();
+    await ensureContentScriptInjected(tabId);
+  } catch (e) {
+    // No EvAN tab yet, or the tab isn't injectable (e.g. a chrome:// page) - runLoop's own
+    // per-row error handling will surface a clear message for that.
+  }
+
   runLoop();
   return { total: rows.length, toProcess: rows.filter((r) => r.status === 'pending').length };
 }
