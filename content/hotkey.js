@@ -1,11 +1,14 @@
-// Quick-fill hotkey: fills the "start a reinspection" boilerplate fields on the building-edit
-// screen for someone working manually, without touching the excel/grouping fields at all.
+// One quick-fill hotkey for manual work: Ctrl+Shift+Q, reachable one-handed (pinky+ring on the
+// modifiers, index on Q) and not a Chrome/OS-reserved shortcut. It checks which EvAN screen is
+// open and does the matching action:
 //
-// Combo: Ctrl+Shift+Q. Picked because it's reachable one-handed (pinky+ring on the modifiers,
-// index on Q) and Ctrl+Shift+<letter> combos are rarely claimed by the browser or by EvAN itself.
+//  - Building-edit screen: fills the "start a reinspection" boilerplate fields, without
+//    touching the excel/grouping fields at all.
+//  - PNOT note screen: clicks Add, then adds a note "<inspector code> Reinspection Update"
+//    (e.g. "H91 Reinspection Update").
 
 (function () {
-  const { FIELDS, $, setFieldById, todayYYYYMMDD } = window.EvanFields;
+  const { FIELDS, $, setFieldById, todayYYYYMMDD, addPnotNote } = window.EvanFields;
 
   let hotkeyEnabled = false;
 
@@ -22,8 +25,12 @@
     }
   });
 
-  function onEditScreen() {
+  function onBuildingEditScreen() {
     return !!$(FIELDS.inspectorNew);
+  }
+
+  function onPnotScreen() {
+    return !!$(FIELDS.pnotAddButton);
   }
 
   function showToast(message, isError) {
@@ -46,19 +53,19 @@
     return !el || el.disabled || el.readOnly;
   }
 
-  function quickFill() {
-    if (!onEditScreen()) {
-      showToast('Quick-fill: not on a building-edit screen.', true);
-      return;
-    }
-
+  function withInspectorCode(callback) {
     chrome.storage.local.get(['inspectorCode'], (data) => {
       const inspectorCode = (data.inspectorCode || '').trim();
       if (!inspectorCode) {
-        showToast('Quick-fill: set an inspector code in the extension popup first.', true);
+        showToast('Set an inspector code in the extension popup first.', true);
         return;
       }
+      callback(inspectorCode);
+    });
+  }
 
+  function quickFillBuildingEdit() {
+    withInspectorCode((inspectorCode) => {
       setFieldById(FIELDS.ncmicReasonDetails, 'reinspection update');
       setFieldById(FIELDS.ncmicReasonNew, 'OTHER_NO_SPM_NCMIC');
       setFieldById(FIELDS.assessmentProcess1, 'RE-INSPECTION');
@@ -80,14 +87,32 @@
     });
   }
 
+  function quickPnotNote() {
+    withInspectorCode(async (inspectorCode) => {
+      const noteText = `${inspectorCode} Reinspection Update`;
+      try {
+        const submitted = await addPnotNote(noteText);
+        showToast(submitted ? 'Note added.' : 'Note typed, but no submit button was found, check it manually.', !submitted);
+      } catch (err) {
+        showToast('Quick-note failed: ' + (err && err.message ? err.message : err), true);
+      }
+    });
+  }
+
   document.addEventListener(
     'keydown',
     (e) => {
       if (!hotkeyEnabled) return;
+      if (!e.ctrlKey || !e.shiftKey || e.altKey) return;
+      if (e.key.toLowerCase() !== 'q') return;
 
-      if (e.ctrlKey && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'q') {
-        e.preventDefault();
-        quickFill();
+      e.preventDefault();
+      if (onBuildingEditScreen()) {
+        quickFillBuildingEdit();
+      } else if (onPnotScreen()) {
+        quickPnotNote();
+      } else {
+        showToast('Quick-fill: not on a building-edit or PNOT screen.', true);
       }
     },
     true

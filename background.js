@@ -3,26 +3,88 @@ importScripts('lib/xlsx.full.min.js');
 // Orchestrates the bulk run so it survives the popup closing (popups don't stay open) and,
 // as best as an MV3 service worker can, survives being briefly killed and restarted mid-run:
 // state is persisted to storage after every row and resumed automatically on wake.
+//
+// Navigating between EvAN screens (typing "bldg <pan>" or "PNOT <pan>" into the search bar and
+// clicking Go) is a full page reload, not an in-page AJAX update - it destroys whatever content
+// script was running mid-step. So every row is driven as a small state machine of messages, and
+// after each navigation-triggering message this file waits for the tab to actually finish
+// reloading (polling chrome.tabs.get) before sending the next one, instead of trying to keep a
+// single message/response pair alive across the reload.
 
 const STORAGE_KEY = 'runState';
 
 let runState = null; // in-memory working copy while a run is active
 
-function normalizeText(s) {
+// --- Text matching for groupings ---------------------------------------------------------
+
+function normalizeLoose(s) {
+  // Lowercase, strip accents, drop everything that isn't a letter/digit - so "Mini Home",
+  // "mini-home" and "minihome" all collapse to the same string, and French accents don't
+  // matter either.
   return (s || '')
     .normalize('NFD')
     .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
-    .trim();
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function levenshtein(a, b) {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = new Array(n + 1);
+  let curr = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}
+
+// True if `needle` appears in `haystack` either as an exact substring, or - for typo tolerance
+// on real-world description text - as a substring-length window whose edit distance to needle
+// is small. Short keywords get zero fuzz (too easy to false-positive on 3-4 letter words).
+function fuzzyIncludes(haystack, needle) {
+  if (!needle) return false;
+  if (haystack.includes(needle)) return true;
+
+  const maxDist = needle.length <= 4 ? 0 : needle.length <= 7 ? 1 : 2;
+  if (maxDist === 0) return false;
+
+  for (let start = 0; start <= haystack.length - (needle.length - maxDist); start++) {
+    for (let len = needle.length - maxDist; len <= needle.length + maxDist; len++) {
+      if (start + len > haystack.length || len <= 0) continue;
+      const window = haystack.substr(start, len);
+      if (levenshtein(window, needle) <= maxDist) return true;
+    }
+  }
+  return false;
 }
 
 function matchGrouping(description, groupings) {
-  const desc = normalizeText(description);
-  const matches = groupings.filter((g) => g.keyword && desc.includes(normalizeText(g.keyword)));
-  if (matches.length === 1) return { status: 'ok', grouping: matches[0] };
-  if (matches.length === 0) return { status: 'no_match' };
-  return { status: 'ambiguous', matches };
+  const desc = normalizeLoose(description);
+
+  const hits = groupings.filter((g) => g.keyword && fuzzyIncludes(desc, normalizeLoose(g.keyword)));
+
+  // Multiple keyword rows for the same grouping number (e.g. "mini home" and "mobile" both
+  // filed under 24) both matching isn't ambiguous - it's the same answer twice.
+  const byNumber = new Map();
+  for (const hit of hits) {
+    if (!byNumber.has(hit.number)) byNumber.set(hit.number, hit);
+  }
+
+  if (byNumber.size === 1) return { status: 'ok', grouping: [...byNumber.values()][0] };
+  if (byNumber.size === 0) return { status: 'no_match' };
+  return { status: 'ambiguous', matches: [...byNumber.values()] };
 }
+
+// --- Row parsing ---------------------------------------------------------------------------
 
 function toPanSearchId(panValue) {
   const digits = String(panValue).replace(/\D/g, '');
@@ -100,6 +162,62 @@ async function buildRows(sheetRows, columnMap, groupings) {
   return results;
 }
 
+// --- Navigation helpers ---------------------------------------------------------------------
+
+// Waits for the tab to finish a navigation triggered a moment ago. Polls chrome.tabs.get rather
+// than chrome.tabs.onUpdated so it also works if the navigation already completed by the time
+// this is called (no event race).
+async function waitForTabLoaded(tabId, { timeout = 15000, settleMs = 250 } = {}) {
+  const start = Date.now();
+  let sawLoading = false;
+  while (Date.now() - start < timeout) {
+    let tab;
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch (e) {
+      throw new Error('EvAN tab was closed.');
+    }
+    if (tab.status === 'loading') sawLoading = true;
+    if (tab.status === 'complete' && sawLoading) {
+      await new Promise((r) => setTimeout(r, settleMs));
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  // Didn't observe a loading->complete transition (maybe it was instant); give it one more
+  // settle beat and move on rather than failing the whole row over a timing fluke.
+  await new Promise((r) => setTimeout(r, settleMs));
+}
+
+// The content script is freshly injected on every page load, but there can be a few ms gap
+// between the tab reporting "complete" and the script's listener being registered. Retry a
+// handful of times on "Receiving end does not exist" before giving up.
+async function sendMessageWithRetry(tabId, message, { retries = 6, delay = 200 } = {}) {
+  let lastError;
+  for (let i = 0; i < retries; i++) {
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, message);
+      return response;
+    } catch (err) {
+      lastError = err;
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastError || new Error('sendMessage failed');
+}
+
+async function navigateAndWait(tabId, command) {
+  try {
+    await sendMessageWithRetry(tabId, { type: 'TRIGGER_NAV', command }, { retries: 3, delay: 150 });
+  } catch (e) {
+    // The port can legitimately die right as navigation starts (bfcache/teardown) - that's
+    // expected here, not a failure, as long as the tab actually ends up navigating.
+  }
+  await waitForTabLoaded(tabId);
+}
+
+// --- Run state machine -----------------------------------------------------------------------
+
 async function startRun(sheetRows, columnMap, groupings, inspectorCode) {
   const rows = await buildRows(sheetRows, columnMap, groupings);
   runState = {
@@ -127,6 +245,32 @@ function pushLog(entry) {
   if (runState.log.length > 500) runState.log.shift();
 }
 
+async function processOneRow(tabId, row) {
+  await navigateAndWait(tabId, `bldg ${row.panSearchId}`);
+
+  const fillResponse = await sendMessageWithRetry(tabId, {
+    type: 'FILL_AND_SAVE_BUILDING',
+    row,
+    settings: { inspectorCode: runState.inspectorCode },
+  });
+  if (!fillResponse || !fillResponse.ok) {
+    throw new Error((fillResponse && fillResponse.error) || 'building edit step failed');
+  }
+  const { value, garageAdded, garagePending } = fillResponse.result;
+
+  let note = `${runState.inspectorCode}, Grouping ${row.groupingNumber} ${row.groupingLabel}, ${row.netConditionPercent}%`;
+  if (garageAdded) note += ', added 736';
+
+  await navigateAndWait(tabId, `PNOT ${row.panSearchId}`);
+
+  const noteResponse = await sendMessageWithRetry(tabId, { type: 'ADD_PNOT_NOTE', noteText: note });
+  if (!noteResponse || !noteResponse.ok) {
+    throw new Error((noteResponse && noteResponse.error) || 'PNOT note step failed');
+  }
+
+  return { value, note, garagePending, noteSubmitted: noteResponse.result.noteSubmitted };
+}
+
 async function runLoop() {
   if (!runState || runState.status !== 'running') return;
 
@@ -148,28 +292,18 @@ async function runLoop() {
 
   try {
     const tabId = await getEvanTabId();
-    const response = await chrome.tabs.sendMessage(tabId, {
-      type: 'PROCESS_ROW',
-      row,
-      settings: { inspectorCode: runState.inspectorCode },
-    });
+    const result = await processOneRow(tabId, row);
 
-    if (!response || !response.ok) {
-      row.status = 'error';
-      row.reason = (response && response.error) || 'unknown error';
-      pushLog(`Error on PAN ${row.pan}: ${row.reason}`);
-    } else {
-      row.status = 'done';
-      row.value = response.result.value;
-      row.note = response.result.note;
-      if (response.result.pendingGarage736) {
-        row.reason = 'pending 736';
-      }
-      if (!response.result.noteSubmitted) {
-        row.reason = (row.reason ? row.reason + '; ' : '') + 'PNOT note may need manual confirmation';
-      }
-      pushLog(`Done PAN ${row.pan}: value ${row.value}`);
+    row.status = 'done';
+    row.value = result.value;
+    row.note = result.note;
+    if (result.garagePending) {
+      row.reason = 'pending 736';
     }
+    if (!result.noteSubmitted) {
+      row.reason = (row.reason ? row.reason + '; ' : '') + 'PNOT note may need manual confirmation';
+    }
+    pushLog(`Done PAN ${row.pan}: value ${row.value}`);
   } catch (err) {
     row.status = 'error';
     row.reason = String(err && err.message ? err.message : err);

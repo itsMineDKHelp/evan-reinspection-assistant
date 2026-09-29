@@ -94,6 +94,49 @@
     return true;
   }
 
+  function setTextareaValue(el, value) {
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    nativeSetter.call(el, value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // Clicks Add on the PNOT screen and finds the note textarea that appears. There's no stable
+  // id for it (JSF generated), so this grabs whichever textarea newly became visible.
+  async function openPnotNoteBox() {
+    const before = new Set(Array.from(document.querySelectorAll('textarea')));
+    clickElement($(FIELDS.pnotAddButton));
+
+    return waitFor(() => {
+      const areas = Array.from(document.querySelectorAll('textarea')).filter((t) => t.offsetParent !== null);
+      const fresh = areas.find((t) => !before.has(t));
+      return fresh || areas[0] || null;
+    }, { timeout: 8000 });
+  }
+
+  // Best effort: no submit button id was given for the PNOT note popup, so this looks for a
+  // visible Save/OK/Submit/Add-ish button inside the same dialog and clicks it.
+  function submitPnotPopup(textarea) {
+    const container = textarea.closest('.rich-modalpanel, .rf-pp, [id*="Panel"]') || document.body;
+    const submitBtn = Array.from(
+      container.querySelectorAll('input[type="submit"], input[type="button"], button')
+    ).find((el) => /save|ok|submit|add/i.test(el.value || el.textContent || '') && el.offsetParent !== null);
+    if (submitBtn) {
+      clickElement(submitBtn);
+      return true;
+    }
+    return false;
+  }
+
+  async function addPnotNote(noteText) {
+    await waitForElement(FIELDS.pnotAddButton, { timeout: 10000 });
+    const textarea = await openPnotNoteBox();
+    setTextareaValue(textarea, noteText);
+    const submitted = submitPnotPopup(textarea);
+    if (submitted) await sleep(300);
+    return submitted;
+  }
+
   window.EvanFields = {
     FIELDS,
     CODE_SLOT_COUNT,
@@ -105,5 +148,9 @@
     setFieldById,
     todayYYYYMMDD,
     clickElement,
+    setTextareaValue,
+    openPnotNoteBox,
+    submitPnotPopup,
+    addPnotNote,
   };
 })();

@@ -1,16 +1,35 @@
 // Bulk reinspection automation: drives one PAN through the building-edit screen and the PNOT
 // note screen. Grouping matching and row filtering already happened before this runs (in the
 // background script) - this file only touches the DOM.
+//
+// IMPORTANT: the quicknav search bar + Go button causes a full page navigation (a new EvAN
+// screen loads), not an in-page AJAX update. That destroys this content script's execution
+// context mid-flight. So navigation is never awaited from in here - the background script
+// triggers a nav, then waits for the tab to finish reloading (a fresh copy of this script gets
+// injected automatically), and only then sends the next step. Everything *within* one step
+// below (edit link, field fills, calculate/save, the PNOT add popup) is same-page AJAX and is
+// safe to await normally.
 
 (function () {
-  const { FIELDS, CODE_SLOT_COUNT, $, sleep, waitFor, waitForElement, setFieldById, todayYYYYMMDD, clickElement } =
-    window.EvanFields;
+  const {
+    FIELDS,
+    CODE_SLOT_COUNT,
+    $,
+    waitFor,
+    waitForElement,
+    setFieldById,
+    todayYYYYMMDD,
+    clickElement,
+    addPnotNote,
+  } = window.EvanFields;
 
   function isFieldLocked(el) {
     return !el || el.disabled || el.readOnly;
   }
 
-  function goto(command) {
+  // Fire-and-forget: sets the search bar and clicks Go. Does not wait for the resulting
+  // navigation - the caller (background) polls the tab for load completion instead.
+  function triggerNavigate(command) {
     const bar = $(FIELDS.searchBar);
     if (!bar) throw new Error('Search bar not found');
     const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
@@ -41,7 +60,7 @@
   }
 
   // Returns true if a 736 slot was added, false if nothing needed to happen or there was no
-  // free slot (in which case `pendingReason` on the result gets set by the caller).
+  // free slot (in which case `pending` on the result gets set).
   function apply736ForGarage(ageValue) {
     const age = parseInt(ageValue, 10);
     if (!(age >= 1990)) return { added: false, pending: false };
@@ -57,14 +76,6 @@
     setFieldById(freeSlot.codeEl.id, '0736');
     if (freeSlot.areaEl) setFieldById(freeSlot.areaEl.id, garageAreaValue);
     return { added: true, pending: false };
-  }
-
-  async function openBuildingEdit(panSearchId) {
-    goto(`bldg ${panSearchId}`);
-    await waitForElement(FIELDS.editLinkRow(0), { timeout: 10000 });
-    const editLink = $(FIELDS.editLinkRow(0));
-    clickElement(editLink);
-    await waitForElement(FIELDS.inspectorNew, { timeout: 10000 });
   }
 
   function fillBoilerplateFields(inspectorCode, netConditionPercent, groupingNumber) {
@@ -116,54 +127,16 @@
     return parseInt(match[1].replace(/,/g, ''), 10);
   }
 
-  // Finds the note textarea that appears after clicking Add on the PNOT screen. There's no
-  // stable id for it (JSF generated), so we grab the only textarea that becomes visible.
-  async function findPnotTextarea() {
-    const before = new Set(Array.from(document.querySelectorAll('textarea')));
-    const addButton = $(FIELDS.pnotAddButton);
-    clickElement(addButton);
+  // --- Step entry points, called by content.js in response to background messages ---
 
-    return waitFor(() => {
-      const areas = Array.from(document.querySelectorAll('textarea')).filter((t) => t.offsetParent !== null);
-      const fresh = areas.find((t) => !before.has(t));
-      return fresh || areas[0] || null;
-    }, { timeout: 8000 });
-  }
+  // Step 1: called right after navigating to "bldg <pan>". Clicks the edit link (AJAX, safe to
+  // await), fills every field, applies the 803/736 code rules, calculates and saves.
+  async function fillAndSaveBuilding(row, settings) {
+    await waitForElement(FIELDS.editLinkRow(0), { timeout: 10000 });
+    clickElement($(FIELDS.editLinkRow(0)));
+    await waitForElement(FIELDS.inspectorNew, { timeout: 10000 });
 
-  function setTextareaValue(el, value) {
-    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-    nativeSetter.call(el, value);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-
-  async function addPnotNote(panSearchId, noteText) {
-    goto(`PNOT ${panSearchId}`);
-    await waitForElement(FIELDS.pnotAddButton, { timeout: 10000 });
-    const textarea = await findPnotTextarea();
-    setTextareaValue(textarea, noteText);
-
-    // No submit button id was given for this popup; best effort: look for a visible
-    // Save/OK/Submit button inside the same dialog and click it.
-    const container = textarea.closest('.rich-modalpanel, .rf-pp, [id*="Panel"]') || document.body;
-    const submitBtn = Array.from(
-      container.querySelectorAll('input[type="submit"], input[type="button"], button')
-    ).find((el) => /save|ok|submit|add/i.test(el.value || el.textContent || '') && el.offsetParent !== null);
-    if (submitBtn) {
-      clickElement(submitBtn);
-      await sleep(300);
-      return true;
-    }
-    return false; // caller should flag this PAN as needing manual note confirmation
-  }
-
-  async function processRow(row, settings) {
-    const { panSearchId, netConditionPercent, groupingNumber, groupingLabel } = row;
-    const { inspectorCode } = settings;
-
-    await openBuildingEdit(panSearchId);
-
-    fillBoilerplateFields(inspectorCode, netConditionPercent, groupingNumber);
+    fillBoilerplateFields(settings.inspectorCode, row.netConditionPercent, row.groupingNumber);
     apply803to802();
 
     const ageEl = $(FIELDS.age);
@@ -172,19 +145,14 @@
     const bannerText = await calculateAndSave();
     const value = parseGrossAssmt(bannerText);
 
-    let note = `${inspectorCode}, Grouping ${groupingNumber} ${groupingLabel}, ${netConditionPercent}%`;
-    if (garageResult.added) note += ', added 736';
-
-    const noteSubmitted = await addPnotNote(panSearchId, note);
-
-    return {
-      pan: row.pan,
-      value,
-      note,
-      pendingGarage736: garageResult.pending,
-      noteSubmitted,
-    };
+    return { value, garageAdded: garageResult.added, garagePending: garageResult.pending };
   }
 
-  window.EvanAutomation = { processRow };
+  // Step 2: called right after navigating to "PNOT <pan>". Clicks Add, fills the note, submits.
+  async function addPnotNoteOnly(noteText) {
+    const noteSubmitted = await addPnotNote(noteText);
+    return { noteSubmitted };
+  }
+
+  window.EvanAutomation = { triggerNavigate, fillAndSaveBuilding, addPnotNoteOnly };
 })();
